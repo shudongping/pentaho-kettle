@@ -23,6 +23,10 @@
 
 package org.pentaho.di.core.row.value;
 
+import com.vividsolutions.jts.geom.Geometry;
+import com.vividsolutions.jts.io.WKBReader;
+import com.vividsolutions.jts.io.WKBWriter;
+import com.vividsolutions.jts.io.WKTReader;
 import org.pentaho.di.compatibility.Value;
 import org.pentaho.di.core.Const;
 import org.pentaho.di.core.database.DatabaseInterface;
@@ -38,6 +42,7 @@ import org.pentaho.di.core.exception.KettleEOFException;
 import org.pentaho.di.core.exception.KettleException;
 import org.pentaho.di.core.exception.KettleFileException;
 import org.pentaho.di.core.exception.KettleValueException;
+import org.pentaho.di.core.geospatial.SRS;
 import org.pentaho.di.core.gui.PrimitiveGCInterface;
 import org.pentaho.di.core.logging.KettleLogStore;
 import org.pentaho.di.core.logging.LogChannelInterface;
@@ -177,7 +182,10 @@ public class ValueMetaBase implements ValueMetaInterface {
   protected int originalNullable;
   protected boolean originalSigned;
 
-  private static final LogChannelInterface log = KettleLogStore.getLogChannelInterfaceFactory().create( "ValueMetaBase" );
+    private SRS geometrySRS;
+
+
+    private static final LogChannelInterface log = KettleLogStore.getLogChannelInterfaceFactory().create("ValueMetaBase");
 
   /**
    * The trim type codes
@@ -431,7 +439,9 @@ public class ValueMetaBase implements ValueMetaInterface {
       if ( conversionMetadata != null ) {
         valueMeta.conversionMetadata = conversionMetadata.clone();
       }
-
+      if (geometrySRS!=null) {
+        valueMeta.geometrySRS = (SRS) geometrySRS.clone();
+      }
       valueMeta.compareStorageAndActualFormat();
 
       return valueMeta;
@@ -509,13 +519,91 @@ public class ValueMetaBase implements ValueMetaInterface {
     return this.length < 1;
   }
 
-  /**
-   * @return the name
-   */
-  @Override
-  public String getName() {
-    return name;
-  }
+    @Override
+    public SRS getGeometrySRS() {
+        return geometrySRS != null ? geometrySRS : SRS.UNKNOWN;
+    }
+
+    @Override
+    public void setGeometrySRS(SRS s) {
+        this.geometrySRS = (geometrySRS != null) ? geometrySRS : SRS.UNKNOWN;
+    }
+
+    @Override
+    public boolean isGeometry() {
+        return type == TYPE_GEOMETRY;
+    }
+
+    @Override
+    public Geometry getGeometry(Object object) throws KettleValueException {
+        if (object == null) // NULL
+        {
+            return null;
+        }
+        switch (type) {
+            case TYPE_BINARY:
+                switch (storageType) {
+                    case STORAGE_TYPE_NORMAL:
+                        return convertBinaryToGeometry((byte[]) object);
+                    case STORAGE_TYPE_BINARY_STRING:
+                        return convertBinaryToGeometry((byte[]) object);
+                    case STORAGE_TYPE_INDEXED:
+                        return convertBinaryToGeometry((byte[]) index[((Integer) object).intValue()]);
+                    default:
+                        throw new KettleValueException(toString() + " : Unknown storage type " + storageType + " specified.");
+                }
+            case TYPE_DATE:
+                throw new KettleValueException(toString() + " : I don't know how to convert a date to Geometry.");
+            case TYPE_STRING:
+                switch (storageType) {
+                    case STORAGE_TYPE_NORMAL:
+                        return convertStringToGeometry((String) object);
+                    case STORAGE_TYPE_BINARY_STRING:
+                        return convertStringToGeometry((String) convertBinaryStringToNativeType((byte[]) object));
+                    case STORAGE_TYPE_INDEXED:
+                        return convertStringToGeometry((String) index[((Integer) object).intValue()]);
+                    default:
+                        throw new KettleValueException(toString() + " : Unknown storage type " + storageType + " specified.");
+                }
+            case TYPE_NUMBER:
+                throw new KettleValueException(toString() + " : I don't know how to convert a number to Geometry.");
+            case TYPE_INTEGER:
+                throw new KettleValueException(toString() + " : I don't know how to convert an integer to Geometry.");
+            case TYPE_BIGNUMBER:
+                throw new KettleValueException(toString() + " : I don't know how to convert a bignumber to Geometry.");
+            case TYPE_BOOLEAN:
+                throw new KettleValueException(toString() + " : I don't know how to convert a boolean to Geometry.");
+            case TYPE_SERIALIZABLE:
+                throw new KettleValueException(toString() + " : I don't know how to convert a serializable to Geometry.");
+            case TYPE_GEOMETRY:
+                return (Geometry) object;
+            default:
+                throw new KettleValueException(toString() + " : Unknown type " + type + " specified.");
+        }
+    }
+
+
+
+    private Geometry convertStringToGeometry(String s) {
+        if (s == null) return null;
+        Geometry geom = null;
+        try {
+            geom = new WKTReader().read(s);
+        } catch (com.vividsolutions.jts.io.ParseException e) {
+            // TODO: log error
+            // e.printStackTrace();
+        }
+        return geom;
+    }
+
+
+    /**
+     * @return the name
+     */
+    @Override
+    public String getName() {
+        return name;
+    }
 
   /**
    * @param name
@@ -543,22 +631,24 @@ public class ValueMetaBase implements ValueMetaInterface {
     this.origin = origin;
   }
 
-  /**
-   * @return the precision
-   */
-  @Override
-  public int getPrecision() {
-    // For backward compatibility we need to tweak a bit...
-    //
-    if ( isInteger() || isBinary() ) {
-      return 0;
+    /**
+     * @return the precision
+     */
+    @Override
+    public int getPrecision() {
+        // For backward compatibility we need to tweak a bit...
+        //
+        if (isInteger() || isBinary()) {
+            return 0;
+        }
+        if (isString() || isBoolean()) {
+            return -1;
+        }
+        if (isGeometry()) {
+            return -1;
+        }
+        return precision;
     }
-    if ( isString() || isBoolean() ) {
-      return -1;
-    }
-
-    return precision;
-  }
 
   /**
    * @param precision
@@ -1644,7 +1734,8 @@ public class ValueMetaBase implements ValueMetaInterface {
           // Let's not create a copy but simply return the same value.
           //
           return object;
-
+        case ValueMetaInterface.TYPE_GEOMETRY:
+          return ((Geometry)object).clone();
         default:
           throw new KettleValueException( toString() + ": unable to make copy of value type: " + getType() );
       }
@@ -1873,7 +1964,17 @@ public class ValueMetaBase implements ValueMetaInterface {
               throw new KettleValueException( toString() + " : Unknown storage type " + storageType + " specified." );
           }
           break;
-
+        case TYPE_GEOMETRY:
+          switch(storageType)
+          {
+            case STORAGE_TYPE_NORMAL:         string = convertGeometryToString((Geometry)object); break;
+            case STORAGE_TYPE_BINARY_STRING:  string = convertGeometryToString((Geometry)convertBinaryStringToNativeType((byte[])object)); break; // TODO: check if this is OK
+            case STORAGE_TYPE_INDEXED:        string = object==null ? null : convertGeometryToString((Geometry) index[((Integer)object).intValue()]);  break;
+            default: throw new KettleValueException(toString()+" : Unknown storage type "+storageType+" specified.");
+          }
+          if ( string != null )
+            string = trim(string);
+          break;
         default:
           throw new KettleValueException( toString() + " : Unknown type " + type + " specified." );
       }
@@ -1909,456 +2010,501 @@ public class ValueMetaBase implements ValueMetaInterface {
     return string;
   }
 
-  @Override
-  public Double getNumber( Object object ) throws KettleValueException {
-    try {
-      if ( isNull( object ) ) {
-        return null;
-      }
-      switch ( type ) {
-        case TYPE_NUMBER:
-          switch ( storageType ) {
-            case STORAGE_TYPE_NORMAL:
-              return (Double) object;
-            case STORAGE_TYPE_BINARY_STRING:
-              return (Double) convertBinaryStringToNativeType( (byte[]) object );
-            case STORAGE_TYPE_INDEXED:
-              return (Double) index[( (Integer) object ).intValue()];
-            default:
-              throw new KettleValueException( toString() + " : Unknown storage type " + storageType + " specified." );
-          }
-        case TYPE_STRING:
-          switch ( storageType ) {
-            case STORAGE_TYPE_NORMAL:
-              return convertStringToNumber( (String) object );
-            case STORAGE_TYPE_BINARY_STRING:
-              return convertStringToNumber( (String) convertBinaryStringToNativeType( (byte[]) object ) );
-            case STORAGE_TYPE_INDEXED:
-              return convertStringToNumber( (String) index[( (Integer) object ).intValue()] );
-            default:
-              throw new KettleValueException( toString() + " : Unknown storage type " + storageType + " specified." );
-          }
-        case TYPE_DATE:
-          switch ( storageType ) {
-            case STORAGE_TYPE_NORMAL:
-              return convertDateToNumber( (Date) object );
-            case STORAGE_TYPE_BINARY_STRING:
-              return convertDateToNumber( (Date) convertBinaryStringToNativeType( (byte[]) object ) );
-            case STORAGE_TYPE_INDEXED:
-              return new Double( ( (Date) index[( (Integer) object ).intValue()] ).getTime() );
-            default:
-              throw new KettleValueException( toString() + " : Unknown storage type " + storageType + " specified." );
-          }
-        case TYPE_INTEGER:
-          switch ( storageType ) {
-            case STORAGE_TYPE_NORMAL:
-              return new Double( ( (Long) object ).doubleValue() );
-            case STORAGE_TYPE_BINARY_STRING:
-              return new Double( ( (Long) convertBinaryStringToNativeType( (byte[]) object ) ).doubleValue() );
-            case STORAGE_TYPE_INDEXED:
-              return new Double( ( (Long) index[( (Integer) object ).intValue()] ).doubleValue() );
-            default:
-              throw new KettleValueException( toString() + " : Unknown storage type " + storageType + " specified." );
-          }
-        case TYPE_BIGNUMBER:
-          switch ( storageType ) {
-            case STORAGE_TYPE_NORMAL:
-              return new Double( ( (BigDecimal) object ).doubleValue() );
-            case STORAGE_TYPE_BINARY_STRING:
-              return new Double( ( (BigDecimal) convertBinaryStringToNativeType( (byte[]) object ) ).doubleValue() );
-            case STORAGE_TYPE_INDEXED:
-              return new Double( ( (BigDecimal) index[( (Integer) object ).intValue()] ).doubleValue() );
-            default:
-              throw new KettleValueException( toString() + " : Unknown storage type " + storageType + " specified." );
-          }
-        case TYPE_BOOLEAN:
-          switch ( storageType ) {
-            case STORAGE_TYPE_NORMAL:
-              return convertBooleanToNumber( (Boolean) object );
-            case STORAGE_TYPE_BINARY_STRING:
-              return convertBooleanToNumber( (Boolean) convertBinaryStringToNativeType( (byte[]) object ) );
-            case STORAGE_TYPE_INDEXED:
-              return convertBooleanToNumber( (Boolean) index[( (Integer) object ).intValue()] );
-            default:
-              throw new KettleValueException( toString() + " : Unknown storage type " + storageType + " specified." );
-          }
-        case TYPE_BINARY:
-          throw new KettleValueException( toString() + " : I don't know how to convert binary values to numbers." );
-        case TYPE_SERIALIZABLE:
-          throw new KettleValueException( toString() + " : I don't know how to convert serializable values to numbers." );
-        default:
-          throw new KettleValueException( toString() + " : Unknown type " + type + " specified." );
-      }
-    } catch ( Exception e ) {
-      throw new KettleValueException( "Unexpected conversion error while converting value [" + toString()
-          + "] to a Number", e );
+    private String convertGeometryToString(Geometry geom)
+    {
+        if (geom==null) return null;
+        return geom.toText();
     }
-  }
 
-  @Override
-  public Long getInteger( Object object ) throws KettleValueException {
-    try {
-      if ( isNull( object ) ) {
-        return null;
-      }
-      switch ( type ) {
-        case TYPE_INTEGER:
-          switch ( storageType ) {
-            case STORAGE_TYPE_NORMAL:
-              return (Long) object;
-            case STORAGE_TYPE_BINARY_STRING:
-              return (Long) convertBinaryStringToNativeType( (byte[]) object );
-            case STORAGE_TYPE_INDEXED:
-              return (Long) index[( (Integer) object ).intValue()];
-            default:
-              throw new KettleValueException( toString() + " : Unknown storage type " + storageType + " specified." );
-          }
-        case TYPE_STRING:
-          switch ( storageType ) {
-            case STORAGE_TYPE_NORMAL:
-              return convertStringToInteger( (String) object );
-            case STORAGE_TYPE_BINARY_STRING:
-              return convertStringToInteger( (String) convertBinaryStringToNativeType( (byte[]) object ) );
-            case STORAGE_TYPE_INDEXED:
-              return convertStringToInteger( (String) index[( (Integer) object ).intValue()] );
-            default:
-              throw new KettleValueException( toString() + " : Unknown storage type " + storageType + " specified." );
-          }
-        case TYPE_NUMBER:
-          switch ( storageType ) {
-            case STORAGE_TYPE_NORMAL:
-              return new Long( Math.round( ( (Double) object ).doubleValue() ) );
-            case STORAGE_TYPE_BINARY_STRING:
-              return new Long( Math.round( ( (Double) convertBinaryStringToNativeType( (byte[]) object ) )
-                  .doubleValue() ) );
-            case STORAGE_TYPE_INDEXED:
-              return new Long( Math.round( ( (Double) index[( (Integer) object ).intValue()] ).doubleValue() ) );
-            default:
-              throw new KettleValueException( toString() + " : Unknown storage type " + storageType + " specified." );
-          }
-        case TYPE_DATE:
-          switch ( storageType ) {
-            case STORAGE_TYPE_NORMAL:
-              return convertDateToInteger( (Date) object );
-            case STORAGE_TYPE_BINARY_STRING:
-              return new Long( ( (Date) convertBinaryStringToNativeType( (byte[]) object ) ).getTime() );
-            case STORAGE_TYPE_INDEXED:
-              return convertDateToInteger( (Date) index[( (Integer) object ).intValue()] );
-            default:
-              throw new KettleValueException( toString() + " : Unknown storage type " + storageType + " specified." );
-          }
-        case TYPE_BIGNUMBER:
-          switch ( storageType ) {
-            case STORAGE_TYPE_NORMAL:
-              return new Long( ( (BigDecimal) object ).longValue() );
-            case STORAGE_TYPE_BINARY_STRING:
-              return new Long( ( (BigDecimal) convertBinaryStringToNativeType( (byte[]) object ) ).longValue() );
-            case STORAGE_TYPE_INDEXED:
-              return new Long( ( (BigDecimal) index[( (Integer) object ).intValue()] ).longValue() );
-            default:
-              throw new KettleValueException( toString() + " : Unknown storage type " + storageType + " specified." );
-          }
-        case TYPE_BOOLEAN:
-          switch ( storageType ) {
-            case STORAGE_TYPE_NORMAL:
-              return convertBooleanToInteger( (Boolean) object );
-            case STORAGE_TYPE_BINARY_STRING:
-              return convertBooleanToInteger( (Boolean) convertBinaryStringToNativeType( (byte[]) object ) );
-            case STORAGE_TYPE_INDEXED:
-              return convertBooleanToInteger( (Boolean) index[( (Integer) object ).intValue()] );
-            default:
-              throw new KettleValueException( toString() + " : Unknown storage type " + storageType + " specified." );
-          }
-        case TYPE_BINARY:
-          throw new KettleValueException( toString() + " : I don't know how to convert binary values to integers." );
-        case TYPE_SERIALIZABLE:
-          throw new KettleValueException( toString()
-              + " : I don't know how to convert serializable values to integers." );
-        default:
-          throw new KettleValueException( toString() + " : Unknown type " + type + " specified." );
-      }
-    } catch ( Exception e ) {
-      throw new KettleValueException( "Unexpected conversion error while converting value [" + toString()
-          + "] to an Integer", e );
-    }
-  }
 
-  @Override
-  public BigDecimal getBigNumber( Object object ) throws KettleValueException {
-    try {
-      if ( isNull( object ) ) {
-        return null;
-      }
-      switch ( type ) {
-        case TYPE_BIGNUMBER:
-          switch ( storageType ) {
-            case STORAGE_TYPE_NORMAL:
-              return (BigDecimal) object;
-            case STORAGE_TYPE_BINARY_STRING:
-              return (BigDecimal) convertBinaryStringToNativeType( (byte[]) object );
-            case STORAGE_TYPE_INDEXED:
-              return (BigDecimal) index[( (Integer) object ).intValue()];
-            default:
-              throw new KettleValueException( toString() + " : Unknown storage type " + storageType + " specified." );
-          }
-        case TYPE_STRING:
-          switch ( storageType ) {
-            case STORAGE_TYPE_NORMAL:
-              return convertStringToBigNumber( (String) object );
-            case STORAGE_TYPE_BINARY_STRING:
-              return convertStringToBigNumber( (String) convertBinaryStringToNativeType( (byte[]) object ) );
-            case STORAGE_TYPE_INDEXED:
-              return convertStringToBigNumber( (String) index[( (Integer) object ).intValue()] );
-            default:
-              throw new KettleValueException( toString() + " : Unknown storage type " + storageType + " specified." );
-          }
-        case TYPE_INTEGER:
-          switch ( storageType ) {
-            case STORAGE_TYPE_NORMAL:
-              return BigDecimal.valueOf( ( (Long) object ).longValue() );
-            case STORAGE_TYPE_BINARY_STRING:
-              return BigDecimal.valueOf( ( (Long) convertBinaryStringToNativeType( (byte[]) object ) ).longValue() );
-            case STORAGE_TYPE_INDEXED:
-              return BigDecimal.valueOf( ( (Long) index[( (Integer) object ).intValue()] ).longValue() );
-            default:
-              throw new KettleValueException( toString() + " : Unknown storage type " + storageType + " specified." );
-          }
-        case TYPE_NUMBER:
-          switch ( storageType ) {
-            case STORAGE_TYPE_NORMAL:
-              return BigDecimal.valueOf( ( (Double) object ).doubleValue() );
-            case STORAGE_TYPE_BINARY_STRING:
-              return BigDecimal.valueOf( ( (Double) convertBinaryStringToNativeType( (byte[]) object ) ).doubleValue() );
-            case STORAGE_TYPE_INDEXED:
-              return BigDecimal.valueOf( ( (Double) index[( (Integer) object ).intValue()] ).doubleValue() );
-            default:
-              throw new KettleValueException( toString() + " : Unknown storage type " + storageType + " specified." );
-          }
-        case TYPE_DATE:
-          switch ( storageType ) {
-            case STORAGE_TYPE_NORMAL:
-              return convertDateToBigNumber( (Date) object );
-            case STORAGE_TYPE_BINARY_STRING:
-              return convertDateToBigNumber( (Date) convertBinaryStringToNativeType( (byte[]) object ) );
-            case STORAGE_TYPE_INDEXED:
-              return convertDateToBigNumber( (Date) index[( (Integer) object ).intValue()] );
-            default:
-              throw new KettleValueException( toString() + " : Unknown storage type " + storageType + " specified." );
-          }
-        case TYPE_BOOLEAN:
-          switch ( storageType ) {
-            case STORAGE_TYPE_NORMAL:
-              return convertBooleanToBigNumber( (Boolean) object );
-            case STORAGE_TYPE_BINARY_STRING:
-              return convertBooleanToBigNumber( (Boolean) convertBinaryStringToNativeType( (byte[]) object ) );
-            case STORAGE_TYPE_INDEXED:
-              return convertBooleanToBigNumber( (Boolean) index[( (Integer) object ).intValue()] );
-            default:
-              throw new KettleValueException( toString() + " : Unknown storage type " + storageType + " specified." );
-          }
-        case TYPE_BINARY:
-          throw new KettleValueException( toString() + " : I don't know how to convert binary values to BigDecimals." );
-        case TYPE_SERIALIZABLE:
-          throw new KettleValueException( toString() + " : I don't know how to convert serializable values to BigDecimals." );
-        default:
-          throw new KettleValueException( toString() + " : Unknown type " + type + " specified." );
-      }
-    } catch ( Exception e ) {
-      throw new KettleValueException( "Unexpected conversion error while converting value [" + toString()
-          + "] to a BigNumber", e );
-    }
-  }
+    // GEOMETRY + BINARY
 
-  @Override
-  public Boolean getBoolean( Object object ) throws KettleValueException {
-    if ( object == null ) {
-      return null;
+    private byte[] convertGeometryToBinary(Geometry geom)
+    {
+        if (geom==null) return null;
+        // defaults to big endian, 2-dimension representation:
+        WKBWriter wkbWriter = new WKBWriter();
+        return wkbWriter.write(geom);
     }
-    switch ( type ) {
-      case TYPE_BOOLEAN:
-        switch ( storageType ) {
-          case STORAGE_TYPE_NORMAL:
-            return (Boolean) object;
-          case STORAGE_TYPE_BINARY_STRING:
-            return (Boolean) convertBinaryStringToNativeType( (byte[]) object );
-          case STORAGE_TYPE_INDEXED:
-            return (Boolean) index[( (Integer) object ).intValue()];
-          default:
-            throw new KettleValueException( toString() + " : Unknown storage type " + storageType + " specified." );
-        }
-      case TYPE_STRING:
-        switch ( storageType ) {
-          case STORAGE_TYPE_NORMAL:
-            return convertStringToBoolean( trim( (String) object ) );
-          case STORAGE_TYPE_BINARY_STRING:
-            return convertStringToBoolean( trim( (String) convertBinaryStringToNativeType( (byte[]) object ) ) );
-          case STORAGE_TYPE_INDEXED:
-            return convertStringToBoolean( trim( (String) index[( (Integer) object ).intValue()] ) );
-          default:
-            throw new KettleValueException( toString() + " : Unknown storage type " + storageType + " specified." );
-        }
-      case TYPE_INTEGER:
-        switch ( storageType ) {
-          case STORAGE_TYPE_NORMAL:
-            return convertIntegerToBoolean( (Long) object );
-          case STORAGE_TYPE_BINARY_STRING:
-            return convertIntegerToBoolean( (Long) convertBinaryStringToNativeType( (byte[]) object ) );
-          case STORAGE_TYPE_INDEXED:
-            return convertIntegerToBoolean( (Long) index[( (Integer) object ).intValue()] );
-          default:
-            throw new KettleValueException( toString() + " : Unknown storage type " + storageType + " specified." );
-        }
-      case TYPE_NUMBER:
-        switch ( storageType ) {
-          case STORAGE_TYPE_NORMAL:
-            return convertNumberToBoolean( (Double) object );
-          case STORAGE_TYPE_BINARY_STRING:
-            return convertNumberToBoolean( (Double) convertBinaryStringToNativeType( (byte[]) object ) );
-          case STORAGE_TYPE_INDEXED:
-            return convertNumberToBoolean( (Double) index[( (Integer) object ).intValue()] );
-          default:
-            throw new KettleValueException( toString() + " : Unknown storage type " + storageType + " specified." );
-        }
-      case TYPE_BIGNUMBER:
-        switch ( storageType ) {
-          case STORAGE_TYPE_NORMAL:
-            return convertBigNumberToBoolean( (BigDecimal) object );
-          case STORAGE_TYPE_BINARY_STRING:
-            return convertBigNumberToBoolean( (BigDecimal) convertBinaryStringToNativeType( (byte[]) object ) );
-          case STORAGE_TYPE_INDEXED:
-            return convertBigNumberToBoolean( (BigDecimal) index[( (Integer) object ).intValue()] );
-          default:
-            throw new KettleValueException( toString() + " : Unknown storage type " + storageType + " specified." );
-        }
-      case TYPE_DATE:
-        throw new KettleValueException( toString() + " : I don't know how to convert date values to booleans." );
-      case TYPE_BINARY:
-        throw new KettleValueException( toString() + " : I don't know how to convert binary values to booleans." );
-      case TYPE_SERIALIZABLE:
-        throw new KettleValueException( toString() + " : I don't know how to convert serializable values to booleans." );
-      default:
-        throw new KettleValueException( toString() + " : Unknown type " + type + " specified." );
-    }
-  }
 
-  @Override
-  public Date getDate( Object object ) throws KettleValueException {
-    if ( isNull( object ) ) {
-      return null;
+    private Geometry convertBinaryToGeometry(byte[] binary) {
+        Geometry geom = null;
+        try {
+            geom = new WKBReader().read(binary);
+        } catch (com.vividsolutions.jts.io.ParseException e) {
+            // TODO: log error
+            // e.printStackTrace();
+        }
+        return geom;
     }
-    switch ( type ) {
-      case TYPE_DATE:
-        switch ( storageType ) {
-          case STORAGE_TYPE_NORMAL:
-            return (Date) object;
-          case STORAGE_TYPE_BINARY_STRING:
-            return (Date) convertBinaryStringToNativeType( (byte[]) object );
-          case STORAGE_TYPE_INDEXED:
-            return (Date) index[( (Integer) object ).intValue()];
-          default:
-            throw new KettleValueException( toString() + " : Unknown storage type " + storageType + " specified." );
-        }
-      case TYPE_STRING:
-        switch ( storageType ) {
-          case STORAGE_TYPE_NORMAL:
-            return convertStringToDate( (String) object );
-          case STORAGE_TYPE_BINARY_STRING:
-            return convertStringToDate( (String) convertBinaryStringToNativeType( (byte[]) object ) );
-          case STORAGE_TYPE_INDEXED:
-            return convertStringToDate( (String) index[( (Integer) object ).intValue()] );
-          default:
-            throw new KettleValueException( toString() + " : Unknown storage type " + storageType + " specified." );
-        }
-      case TYPE_NUMBER:
-        switch ( storageType ) {
-          case STORAGE_TYPE_NORMAL:
-            return convertNumberToDate( (Double) object );
-          case STORAGE_TYPE_BINARY_STRING:
-            return convertNumberToDate( (Double) convertBinaryStringToNativeType( (byte[]) object ) );
-          case STORAGE_TYPE_INDEXED:
-            return convertNumberToDate( (Double) index[( (Integer) object ).intValue()] );
-          default:
-            throw new KettleValueException( toString() + " : Unknown storage type " + storageType + " specified." );
-        }
-      case TYPE_INTEGER:
-        switch ( storageType ) {
-          case STORAGE_TYPE_NORMAL:
-            return convertIntegerToDate( (Long) object );
-          case STORAGE_TYPE_BINARY_STRING:
-            return convertIntegerToDate( (Long) convertBinaryStringToNativeType( (byte[]) object ) );
-          case STORAGE_TYPE_INDEXED:
-            return convertIntegerToDate( (Long) index[( (Integer) object ).intValue()] );
-          default:
-            throw new KettleValueException( toString() + " : Unknown storage type " + storageType + " specified." );
-        }
-      case TYPE_BIGNUMBER:
-        switch ( storageType ) {
-          case STORAGE_TYPE_NORMAL:
-            return convertBigNumberToDate( (BigDecimal) object );
-          case STORAGE_TYPE_BINARY_STRING:
-            return convertBigNumberToDate( (BigDecimal) convertBinaryStringToNativeType( (byte[]) object ) );
-          case STORAGE_TYPE_INDEXED:
-            return convertBigNumberToDate( (BigDecimal) index[( (Integer) object ).intValue()] );
-          default:
-            throw new KettleValueException( toString() + " : Unknown storage type " + storageType + " specified." );
-        }
-      case TYPE_BOOLEAN:
-        throw new KettleValueException( toString() + " : I don't know how to convert a boolean to a date." );
-      case TYPE_BINARY:
-        throw new KettleValueException( toString() + " : I don't know how to convert a binary value to date." );
-      case TYPE_SERIALIZABLE:
-        throw new KettleValueException( toString() + " : I don't know how to convert a serializable value to date." );
 
-      default:
-        throw new KettleValueException( toString() + " : Unknown type " + type + " specified." );
+    @Override
+    public Double getNumber(Object object) throws KettleValueException {
+        try {
+            if (isNull(object)) {
+                return null;
+            }
+            switch (type) {
+                case TYPE_NUMBER:
+                    switch (storageType) {
+                        case STORAGE_TYPE_NORMAL:
+                            return (Double) object;
+                        case STORAGE_TYPE_BINARY_STRING:
+                            return (Double) convertBinaryStringToNativeType((byte[]) object);
+                        case STORAGE_TYPE_INDEXED:
+                            return (Double) index[((Integer) object).intValue()];
+                        default:
+                            throw new KettleValueException(toString() + " : Unknown storage type " + storageType + " specified.");
+                    }
+                case TYPE_STRING:
+                    switch (storageType) {
+                        case STORAGE_TYPE_NORMAL:
+                            return convertStringToNumber((String) object);
+                        case STORAGE_TYPE_BINARY_STRING:
+                            return convertStringToNumber((String) convertBinaryStringToNativeType((byte[]) object));
+                        case STORAGE_TYPE_INDEXED:
+                            return convertStringToNumber((String) index[((Integer) object).intValue()]);
+                        default:
+                            throw new KettleValueException(toString() + " : Unknown storage type " + storageType + " specified.");
+                    }
+                case TYPE_DATE:
+                    switch (storageType) {
+                        case STORAGE_TYPE_NORMAL:
+                            return convertDateToNumber((Date) object);
+                        case STORAGE_TYPE_BINARY_STRING:
+                            return convertDateToNumber((Date) convertBinaryStringToNativeType((byte[]) object));
+                        case STORAGE_TYPE_INDEXED:
+                            return new Double(((Date) index[((Integer) object).intValue()]).getTime());
+                        default:
+                            throw new KettleValueException(toString() + " : Unknown storage type " + storageType + " specified.");
+                    }
+                case TYPE_INTEGER:
+                    switch (storageType) {
+                        case STORAGE_TYPE_NORMAL:
+                            return new Double(((Long) object).doubleValue());
+                        case STORAGE_TYPE_BINARY_STRING:
+                            return new Double(((Long) convertBinaryStringToNativeType((byte[]) object)).doubleValue());
+                        case STORAGE_TYPE_INDEXED:
+                            return new Double(((Long) index[((Integer) object).intValue()]).doubleValue());
+                        default:
+                            throw new KettleValueException(toString() + " : Unknown storage type " + storageType + " specified.");
+                    }
+                case TYPE_BIGNUMBER:
+                    switch (storageType) {
+                        case STORAGE_TYPE_NORMAL:
+                            return new Double(((BigDecimal) object).doubleValue());
+                        case STORAGE_TYPE_BINARY_STRING:
+                            return new Double(((BigDecimal) convertBinaryStringToNativeType((byte[]) object)).doubleValue());
+                        case STORAGE_TYPE_INDEXED:
+                            return new Double(((BigDecimal) index[((Integer) object).intValue()]).doubleValue());
+                        default:
+                            throw new KettleValueException(toString() + " : Unknown storage type " + storageType + " specified.");
+                    }
+                case TYPE_BOOLEAN:
+                    switch (storageType) {
+                        case STORAGE_TYPE_NORMAL:
+                            return convertBooleanToNumber((Boolean) object);
+                        case STORAGE_TYPE_BINARY_STRING:
+                            return convertBooleanToNumber((Boolean) convertBinaryStringToNativeType((byte[]) object));
+                        case STORAGE_TYPE_INDEXED:
+                            return convertBooleanToNumber((Boolean) index[((Integer) object).intValue()]);
+                        default:
+                            throw new KettleValueException(toString() + " : Unknown storage type " + storageType + " specified.");
+                    }
+                case TYPE_BINARY:
+                    throw new KettleValueException(toString() + " : I don't know how to convert binary values to numbers.");
+                case TYPE_SERIALIZABLE:
+                    throw new KettleValueException(toString() + " : I don't know how to convert serializable values to numbers.");
+                case TYPE_GEOMETRY:
+                    throw new KettleValueException(toString()+" : I don't know how to convert geometry values to numbers.");
+                default:
+                    throw new KettleValueException(toString() + " : Unknown type " + type + " specified.");
+            }
+        } catch (Exception e) {
+            throw new KettleValueException("Unexpected conversion error while converting value [" + toString()
+                    + "] to a Number", e);
+        }
     }
-  }
 
-  @Override
-  public byte[] getBinary( Object object ) throws KettleValueException {
-    if ( object == null ) {
-      return null;
+    @Override
+    public Long getInteger(Object object) throws KettleValueException {
+        try {
+            if (isNull(object)) {
+                return null;
+            }
+            switch (type) {
+                case TYPE_INTEGER:
+                    switch (storageType) {
+                        case STORAGE_TYPE_NORMAL:
+                            return (Long) object;
+                        case STORAGE_TYPE_BINARY_STRING:
+                            return (Long) convertBinaryStringToNativeType((byte[]) object);
+                        case STORAGE_TYPE_INDEXED:
+                            return (Long) index[((Integer) object).intValue()];
+                        default:
+                            throw new KettleValueException(toString() + " : Unknown storage type " + storageType + " specified.");
+                    }
+                case TYPE_STRING:
+                    switch (storageType) {
+                        case STORAGE_TYPE_NORMAL:
+                            return convertStringToInteger((String) object);
+                        case STORAGE_TYPE_BINARY_STRING:
+                            return convertStringToInteger((String) convertBinaryStringToNativeType((byte[]) object));
+                        case STORAGE_TYPE_INDEXED:
+                            return convertStringToInteger((String) index[((Integer) object).intValue()]);
+                        default:
+                            throw new KettleValueException(toString() + " : Unknown storage type " + storageType + " specified.");
+                    }
+                case TYPE_NUMBER:
+                    switch (storageType) {
+                        case STORAGE_TYPE_NORMAL:
+                            return new Long(Math.round(((Double) object).doubleValue()));
+                        case STORAGE_TYPE_BINARY_STRING:
+                            return new Long(Math.round(((Double) convertBinaryStringToNativeType((byte[]) object))
+                                    .doubleValue()));
+                        case STORAGE_TYPE_INDEXED:
+                            return new Long(Math.round(((Double) index[((Integer) object).intValue()]).doubleValue()));
+                        default:
+                            throw new KettleValueException(toString() + " : Unknown storage type " + storageType + " specified.");
+                    }
+                case TYPE_DATE:
+                    switch (storageType) {
+                        case STORAGE_TYPE_NORMAL:
+                            return convertDateToInteger((Date) object);
+                        case STORAGE_TYPE_BINARY_STRING:
+                            return new Long(((Date) convertBinaryStringToNativeType((byte[]) object)).getTime());
+                        case STORAGE_TYPE_INDEXED:
+                            return convertDateToInteger((Date) index[((Integer) object).intValue()]);
+                        default:
+                            throw new KettleValueException(toString() + " : Unknown storage type " + storageType + " specified.");
+                    }
+                case TYPE_BIGNUMBER:
+                    switch (storageType) {
+                        case STORAGE_TYPE_NORMAL:
+                            return new Long(((BigDecimal) object).longValue());
+                        case STORAGE_TYPE_BINARY_STRING:
+                            return new Long(((BigDecimal) convertBinaryStringToNativeType((byte[]) object)).longValue());
+                        case STORAGE_TYPE_INDEXED:
+                            return new Long(((BigDecimal) index[((Integer) object).intValue()]).longValue());
+                        default:
+                            throw new KettleValueException(toString() + " : Unknown storage type " + storageType + " specified.");
+                    }
+                case TYPE_BOOLEAN:
+                    switch (storageType) {
+                        case STORAGE_TYPE_NORMAL:
+                            return convertBooleanToInteger((Boolean) object);
+                        case STORAGE_TYPE_BINARY_STRING:
+                            return convertBooleanToInteger((Boolean) convertBinaryStringToNativeType((byte[]) object));
+                        case STORAGE_TYPE_INDEXED:
+                            return convertBooleanToInteger((Boolean) index[((Integer) object).intValue()]);
+                        default:
+                            throw new KettleValueException(toString() + " : Unknown storage type " + storageType + " specified.");
+                    }
+                case TYPE_BINARY:
+                    throw new KettleValueException(toString() + " : I don't know how to convert binary values to integers.");
+                case TYPE_SERIALIZABLE:
+                    throw new KettleValueException(toString()
+                            + " : I don't know how to convert serializable values to integers.");
+                case TYPE_GEOMETRY:
+                    throw new KettleValueException(toString()+" : I don't know how to convert geometry values to numbers.");
+                default:
+                    throw new KettleValueException(toString() + " : Unknown type " + type + " specified.");
+            }
+        } catch (Exception e) {
+            throw new KettleValueException("Unexpected conversion error while converting value [" + toString()
+                    + "] to an Integer", e);
+        }
     }
-    switch ( type ) {
-      case TYPE_BINARY:
-        switch ( storageType ) {
-          case STORAGE_TYPE_NORMAL:
-            return (byte[]) object;
-          case STORAGE_TYPE_BINARY_STRING:
-            return (byte[]) object;
-          case STORAGE_TYPE_INDEXED:
-            return (byte[]) index[( (Integer) object ).intValue()];
-          default:
-            throw new KettleValueException( toString() + " : Unknown storage type " + storageType + " specified." );
+
+    @Override
+    public BigDecimal getBigNumber(Object object) throws KettleValueException {
+        try {
+            if (isNull(object)) {
+                return null;
+            }
+            switch (type) {
+                case TYPE_BIGNUMBER:
+                    switch (storageType) {
+                        case STORAGE_TYPE_NORMAL:
+                            return (BigDecimal) object;
+                        case STORAGE_TYPE_BINARY_STRING:
+                            return (BigDecimal) convertBinaryStringToNativeType((byte[]) object);
+                        case STORAGE_TYPE_INDEXED:
+                            return (BigDecimal) index[((Integer) object).intValue()];
+                        default:
+                            throw new KettleValueException(toString() + " : Unknown storage type " + storageType + " specified.");
+                    }
+                case TYPE_STRING:
+                    switch (storageType) {
+                        case STORAGE_TYPE_NORMAL:
+                            return convertStringToBigNumber((String) object);
+                        case STORAGE_TYPE_BINARY_STRING:
+                            return convertStringToBigNumber((String) convertBinaryStringToNativeType((byte[]) object));
+                        case STORAGE_TYPE_INDEXED:
+                            return convertStringToBigNumber((String) index[((Integer) object).intValue()]);
+                        default:
+                            throw new KettleValueException(toString() + " : Unknown storage type " + storageType + " specified.");
+                    }
+                case TYPE_INTEGER:
+                    switch (storageType) {
+                        case STORAGE_TYPE_NORMAL:
+                            return BigDecimal.valueOf(((Long) object).longValue());
+                        case STORAGE_TYPE_BINARY_STRING:
+                            return BigDecimal.valueOf(((Long) convertBinaryStringToNativeType((byte[]) object)).longValue());
+                        case STORAGE_TYPE_INDEXED:
+                            return BigDecimal.valueOf(((Long) index[((Integer) object).intValue()]).longValue());
+                        default:
+                            throw new KettleValueException(toString() + " : Unknown storage type " + storageType + " specified.");
+                    }
+                case TYPE_NUMBER:
+                    switch (storageType) {
+                        case STORAGE_TYPE_NORMAL:
+                            return BigDecimal.valueOf(((Double) object).doubleValue());
+                        case STORAGE_TYPE_BINARY_STRING:
+                            return BigDecimal.valueOf(((Double) convertBinaryStringToNativeType((byte[]) object)).doubleValue());
+                        case STORAGE_TYPE_INDEXED:
+                            return BigDecimal.valueOf(((Double) index[((Integer) object).intValue()]).doubleValue());
+                        default:
+                            throw new KettleValueException(toString() + " : Unknown storage type " + storageType + " specified.");
+                    }
+                case TYPE_DATE:
+                    switch (storageType) {
+                        case STORAGE_TYPE_NORMAL:
+                            return convertDateToBigNumber((Date) object);
+                        case STORAGE_TYPE_BINARY_STRING:
+                            return convertDateToBigNumber((Date) convertBinaryStringToNativeType((byte[]) object));
+                        case STORAGE_TYPE_INDEXED:
+                            return convertDateToBigNumber((Date) index[((Integer) object).intValue()]);
+                        default:
+                            throw new KettleValueException(toString() + " : Unknown storage type " + storageType + " specified.");
+                    }
+                case TYPE_BOOLEAN:
+                    switch (storageType) {
+                        case STORAGE_TYPE_NORMAL:
+                            return convertBooleanToBigNumber((Boolean) object);
+                        case STORAGE_TYPE_BINARY_STRING:
+                            return convertBooleanToBigNumber((Boolean) convertBinaryStringToNativeType((byte[]) object));
+                        case STORAGE_TYPE_INDEXED:
+                            return convertBooleanToBigNumber((Boolean) index[((Integer) object).intValue()]);
+                        default:
+                            throw new KettleValueException(toString() + " : Unknown storage type " + storageType + " specified.");
+                    }
+                case TYPE_BINARY:
+                    throw new KettleValueException(toString() + " : I don't know how to convert binary values to BigDecimals.");
+                case TYPE_SERIALIZABLE:
+                    throw new KettleValueException(toString() + " : I don't know how to convert serializable values to BigDecimals.");
+                case TYPE_GEOMETRY:
+                    throw new KettleValueException(toString()+" : I don't know how to convert geometry values to numbers.");
+                default:
+                    throw new KettleValueException(toString() + " : Unknown type " + type + " specified.");
+            }
+        } catch (Exception e) {
+            throw new KettleValueException("Unexpected conversion error while converting value [" + toString()
+                    + "] to a BigNumber", e);
         }
-      case TYPE_DATE:
-        throw new KettleValueException( toString() + " : I don't know how to convert a date to binary." );
-      case TYPE_STRING:
-        switch ( storageType ) {
-          case STORAGE_TYPE_NORMAL:
-            return convertStringToBinaryString( (String) object );
-          case STORAGE_TYPE_BINARY_STRING:
-            return (byte[]) object;
-          case STORAGE_TYPE_INDEXED:
-            return convertStringToBinaryString( (String) index[( (Integer) object ).intValue()] );
-          default:
-            throw new KettleValueException( toString() + " : Unknown storage type " + storageType + " specified." );
+    }
+
+    @Override
+    public Boolean getBoolean(Object object) throws KettleValueException {
+        if (object == null) {
+            return null;
         }
-      case TYPE_NUMBER:
-        throw new KettleValueException( toString() + " : I don't know how to convert a number to binary." );
-      case TYPE_INTEGER:
-        throw new KettleValueException( toString() + " : I don't know how to convert an integer to binary." );
-      case TYPE_BIGNUMBER:
-        throw new KettleValueException( toString() + " : I don't know how to convert a bignumber to binary." );
-      case TYPE_BOOLEAN:
-        throw new KettleValueException( toString() + " : I don't know how to convert a boolean to binary." );
-      case TYPE_SERIALIZABLE:
-        throw new KettleValueException( toString() + " : I don't know how to convert a serializable to binary." );
+        switch (type) {
+            case TYPE_BOOLEAN:
+                switch (storageType) {
+                    case STORAGE_TYPE_NORMAL:
+                        return (Boolean) object;
+                    case STORAGE_TYPE_BINARY_STRING:
+                        return (Boolean) convertBinaryStringToNativeType((byte[]) object);
+                    case STORAGE_TYPE_INDEXED:
+                        return (Boolean) index[((Integer) object).intValue()];
+                    default:
+                        throw new KettleValueException(toString() + " : Unknown storage type " + storageType + " specified.");
+                }
+            case TYPE_STRING:
+                switch (storageType) {
+                    case STORAGE_TYPE_NORMAL:
+                        return convertStringToBoolean(trim((String) object));
+                    case STORAGE_TYPE_BINARY_STRING:
+                        return convertStringToBoolean(trim((String) convertBinaryStringToNativeType((byte[]) object)));
+                    case STORAGE_TYPE_INDEXED:
+                        return convertStringToBoolean(trim((String) index[((Integer) object).intValue()]));
+                    default:
+                        throw new KettleValueException(toString() + " : Unknown storage type " + storageType + " specified.");
+                }
+            case TYPE_INTEGER:
+                switch (storageType) {
+                    case STORAGE_TYPE_NORMAL:
+                        return convertIntegerToBoolean((Long) object);
+                    case STORAGE_TYPE_BINARY_STRING:
+                        return convertIntegerToBoolean((Long) convertBinaryStringToNativeType((byte[]) object));
+                    case STORAGE_TYPE_INDEXED:
+                        return convertIntegerToBoolean((Long) index[((Integer) object).intValue()]);
+                    default:
+                        throw new KettleValueException(toString() + " : Unknown storage type " + storageType + " specified.");
+                }
+            case TYPE_NUMBER:
+                switch (storageType) {
+                    case STORAGE_TYPE_NORMAL:
+                        return convertNumberToBoolean((Double) object);
+                    case STORAGE_TYPE_BINARY_STRING:
+                        return convertNumberToBoolean((Double) convertBinaryStringToNativeType((byte[]) object));
+                    case STORAGE_TYPE_INDEXED:
+                        return convertNumberToBoolean((Double) index[((Integer) object).intValue()]);
+                    default:
+                        throw new KettleValueException(toString() + " : Unknown storage type " + storageType + " specified.");
+                }
+            case TYPE_BIGNUMBER:
+                switch (storageType) {
+                    case STORAGE_TYPE_NORMAL:
+                        return convertBigNumberToBoolean((BigDecimal) object);
+                    case STORAGE_TYPE_BINARY_STRING:
+                        return convertBigNumberToBoolean((BigDecimal) convertBinaryStringToNativeType((byte[]) object));
+                    case STORAGE_TYPE_INDEXED:
+                        return convertBigNumberToBoolean((BigDecimal) index[((Integer) object).intValue()]);
+                    default:
+                        throw new KettleValueException(toString() + " : Unknown storage type " + storageType + " specified.");
+                }
+            case TYPE_DATE:
+                throw new KettleValueException(toString() + " : I don't know how to convert date values to booleans.");
+            case TYPE_BINARY:
+                throw new KettleValueException(toString() + " : I don't know how to convert binary values to booleans.");
+            case TYPE_SERIALIZABLE:
+                throw new KettleValueException(toString() + " : I don't know how to convert serializable values to booleans.");
+            case TYPE_GEOMETRY:
+                throw new KettleValueException(toString()+" : I don't know how to convert geometry values to numbers.");
+            default:
+                throw new KettleValueException(toString() + " : Unknown type " + type + " specified.");
+        }
+    }
+
+    @Override
+    public Date getDate(Object object) throws KettleValueException {
+        if (isNull(object)) {
+            return null;
+        }
+        switch (type) {
+            case TYPE_DATE:
+                switch (storageType) {
+                    case STORAGE_TYPE_NORMAL:
+                        return (Date) object;
+                    case STORAGE_TYPE_BINARY_STRING:
+                        return (Date) convertBinaryStringToNativeType((byte[]) object);
+                    case STORAGE_TYPE_INDEXED:
+                        return (Date) index[((Integer) object).intValue()];
+                    default:
+                        throw new KettleValueException(toString() + " : Unknown storage type " + storageType + " specified.");
+                }
+            case TYPE_STRING:
+                switch (storageType) {
+                    case STORAGE_TYPE_NORMAL:
+                        return convertStringToDate((String) object);
+                    case STORAGE_TYPE_BINARY_STRING:
+                        return convertStringToDate((String) convertBinaryStringToNativeType((byte[]) object));
+                    case STORAGE_TYPE_INDEXED:
+                        return convertStringToDate((String) index[((Integer) object).intValue()]);
+                    default:
+                        throw new KettleValueException(toString() + " : Unknown storage type " + storageType + " specified.");
+                }
+            case TYPE_NUMBER:
+                switch (storageType) {
+                    case STORAGE_TYPE_NORMAL:
+                        return convertNumberToDate((Double) object);
+                    case STORAGE_TYPE_BINARY_STRING:
+                        return convertNumberToDate((Double) convertBinaryStringToNativeType((byte[]) object));
+                    case STORAGE_TYPE_INDEXED:
+                        return convertNumberToDate((Double) index[((Integer) object).intValue()]);
+                    default:
+                        throw new KettleValueException(toString() + " : Unknown storage type " + storageType + " specified.");
+                }
+            case TYPE_INTEGER:
+                switch (storageType) {
+                    case STORAGE_TYPE_NORMAL:
+                        return convertIntegerToDate((Long) object);
+                    case STORAGE_TYPE_BINARY_STRING:
+                        return convertIntegerToDate((Long) convertBinaryStringToNativeType((byte[]) object));
+                    case STORAGE_TYPE_INDEXED:
+                        return convertIntegerToDate((Long) index[((Integer) object).intValue()]);
+                    default:
+                        throw new KettleValueException(toString() + " : Unknown storage type " + storageType + " specified.");
+                }
+            case TYPE_BIGNUMBER:
+                switch (storageType) {
+                    case STORAGE_TYPE_NORMAL:
+                        return convertBigNumberToDate((BigDecimal) object);
+                    case STORAGE_TYPE_BINARY_STRING:
+                        return convertBigNumberToDate((BigDecimal) convertBinaryStringToNativeType((byte[]) object));
+                    case STORAGE_TYPE_INDEXED:
+                        return convertBigNumberToDate((BigDecimal) index[((Integer) object).intValue()]);
+                    default:
+                        throw new KettleValueException(toString() + " : Unknown storage type " + storageType + " specified.");
+                }
+            case TYPE_BOOLEAN:
+                throw new KettleValueException(toString() + " : I don't know how to convert a boolean to a date.");
+            case TYPE_BINARY:
+                throw new KettleValueException(toString() + " : I don't know how to convert a binary value to date.");
+            case TYPE_SERIALIZABLE:
+                throw new KettleValueException(toString() + " : I don't know how to convert a serializable value to date.");
+            case TYPE_GEOMETRY:
+                throw new KettleValueException(toString()+" : I don't know how to convert geometry values to numbers.");
 
       default:
         throw new KettleValueException( toString() + " : Unknown type " + type + " specified." );
     }
   }
+
+    @Override
+    public byte[] getBinary(Object object) throws KettleValueException {
+        if (object == null) {
+            return null;
+        }
+        switch (type) {
+            case TYPE_BINARY:
+                switch (storageType) {
+                    case STORAGE_TYPE_NORMAL:
+                        return (byte[]) object;
+                    case STORAGE_TYPE_BINARY_STRING:
+                        return (byte[]) object;
+                    case STORAGE_TYPE_INDEXED:
+                        return (byte[]) index[((Integer) object).intValue()];
+                    default:
+                        throw new KettleValueException(toString() + " : Unknown storage type " + storageType + " specified.");
+                }
+            case TYPE_DATE:
+                throw new KettleValueException(toString() + " : I don't know how to convert a date to binary.");
+            case TYPE_STRING:
+                switch (storageType) {
+                    case STORAGE_TYPE_NORMAL:
+                        return convertStringToBinaryString((String) object);
+                    case STORAGE_TYPE_BINARY_STRING:
+                        return (byte[]) object;
+                    case STORAGE_TYPE_INDEXED:
+                        return convertStringToBinaryString((String) index[((Integer) object).intValue()]);
+                    default:
+                        throw new KettleValueException(toString() + " : Unknown storage type " + storageType + " specified.");
+                }
+            case TYPE_NUMBER:
+                throw new KettleValueException(toString() + " : I don't know how to convert a number to binary.");
+            case TYPE_INTEGER:
+                throw new KettleValueException(toString() + " : I don't know how to convert an integer to binary.");
+            case TYPE_BIGNUMBER:
+                throw new KettleValueException(toString() + " : I don't know how to convert a bignumber to binary.");
+            case TYPE_BOOLEAN:
+                throw new KettleValueException(toString() + " : I don't know how to convert a boolean to binary.");
+            case TYPE_SERIALIZABLE:
+                throw new KettleValueException(toString() + " : I don't know how to convert a serializable to binary.");
+            case TYPE_GEOMETRY:
+                switch(storageType)
+                {
+                    case STORAGE_TYPE_NORMAL:         return convertGeometryToBinary( (Geometry)object );
+                    case STORAGE_TYPE_BINARY_STRING:  return convertGeometryToBinary( (Geometry)object );
+                    case STORAGE_TYPE_INDEXED:        return convertGeometryToBinary( (Geometry) index[((Integer)object).intValue()] );
+                    default: throw new KettleValueException(toString()+" : Unknown storage type "+storageType+" specified.");
+                }
+            default:
+                throw new KettleValueException(toString() + " : Unknown type " + type + " specified.");
+        }
+    }
 
   @Override
   public byte[] getBinaryString( Object object ) throws KettleValueException {
@@ -2469,27 +2615,34 @@ public class ValueMetaBase implements ValueMetaInterface {
               throw new KettleValueException( toString() + " : Unknown storage type " + storageType + " specified." );
           }
 
-        case TYPE_SERIALIZABLE:
-          switch ( storageType ) {
-            case STORAGE_TYPE_NORMAL:
-              return convertStringToBinaryString( object.toString() );
-            case STORAGE_TYPE_BINARY_STRING:
-              return (byte[]) object;
-            case STORAGE_TYPE_INDEXED:
-              return convertStringToBinaryString( index[( (Integer) object ).intValue()].toString() );
-            default:
-              throw new KettleValueException( toString() + " : Unknown storage type " + storageType + " specified." );
-          }
-
-        default:
-          throw new KettleValueException( toString() + " : Unknown type " + type + " specified." );
-      }
-    } catch ( ClassCastException e ) {
-      throw new KettleValueException( toString() + " : There was a data type error: the data type of "
-          + object.getClass().getName() + " object [" + object + "] does not correspond to value meta ["
-          + toStringMeta() + "]" );
+                case TYPE_SERIALIZABLE:
+                    switch (storageType) {
+                        case STORAGE_TYPE_NORMAL:
+                            return convertStringToBinaryString(object.toString());
+                        case STORAGE_TYPE_BINARY_STRING:
+                            return (byte[]) object;
+                        case STORAGE_TYPE_INDEXED:
+                            return convertStringToBinaryString(index[((Integer) object).intValue()].toString());
+                        default:
+                            throw new KettleValueException(toString() + " : Unknown storage type " + storageType + " specified.");
+                    }
+                case TYPE_GEOMETRY:
+                    switch(storageType)
+                    {
+                        case STORAGE_TYPE_NORMAL:         return convertStringToBinaryString( convertGeometryToString((Geometry)object) );
+                        case STORAGE_TYPE_BINARY_STRING:  return convertStringToBinaryString( convertGeometryToString((Geometry)convertBinaryStringToNativeType((byte[])object)) ); // TODO: check if this is OK
+                        case STORAGE_TYPE_INDEXED:        return convertStringToBinaryString( convertGeometryToString((Geometry) index[((Integer)object).intValue()]) );
+                        default: throw new KettleValueException(toString()+" : Unknown storage type "+storageType+" specified.");
+                    }
+                default:
+                    throw new KettleValueException(toString() + " : Unknown type " + type + " specified.");
+            }
+        } catch (ClassCastException e) {
+            throw new KettleValueException(toString() + " : There was a data type error: the data type of "
+                    + object.getClass().getName() + " object [" + object + "] does not correspond to value meta ["
+                    + toStringMeta() + "]");
+        }
     }
-  }
 
   /**
    * Checks whether or not the value is a String.
@@ -4794,27 +4947,43 @@ public class ValueMetaBase implements ValueMetaInterface {
         case java.sql.Types.LONGVARBINARY:
           valtype = ValueMetaInterface.TYPE_BINARY;
 
-          if ( databaseMeta.isDisplaySizeTwiceThePrecision()
-              && ( 2 * rm.getPrecision( index ) ) == rm.getColumnDisplaySize( index ) ) {
-            // set the length for "CHAR(X) FOR BIT DATA"
-            length = rm.getPrecision( index );
-          } else if ( ( databaseMeta.getDatabaseInterface() instanceof OracleDatabaseMeta )
-              && ( type == java.sql.Types.VARBINARY || type == java.sql.Types.LONGVARBINARY ) ) {
-            // set the length for Oracle "RAW" or "LONGRAW" data types
-            valtype = ValueMetaInterface.TYPE_STRING;
-            length = rm.getColumnDisplaySize( index );
-          } else if ( databaseMeta.isMySQLVariant()
-              && ( type == java.sql.Types.VARBINARY || type == java.sql.Types.LONGVARBINARY ) ) {
-            // PDI-6677 - don't call 'length = rm.getColumnDisplaySize(index);'
-            length = -1; // keep the length to -1, e.g. for string functions (e.g.
-            // CONCAT see PDI-4812)
-          } else if ( databaseMeta.getDatabaseInterface() instanceof SQLiteDatabaseMeta ) {
-            valtype = ValueMetaInterface.TYPE_STRING;
-          } else {
-            length = -1;
-          }
-          precision = -1;
-          break;
+                    if (databaseMeta.isDisplaySizeTwiceThePrecision()
+                            && (2 * rm.getPrecision(index)) == rm.getColumnDisplaySize(index)) {
+                        // set the length for "CHAR(X) FOR BIT DATA"
+                        length = rm.getPrecision(index);
+                    } else if ((databaseMeta.getDatabaseInterface() instanceof OracleDatabaseMeta)
+                            && (type == java.sql.Types.VARBINARY || type == java.sql.Types.LONGVARBINARY)) {
+                        // set the length for Oracle "RAW" or "LONGRAW" data types
+                        valtype = ValueMetaInterface.TYPE_STRING;
+                        length = rm.getColumnDisplaySize(index);
+                    } else if (databaseMeta.isMySQLVariant()
+                            && (type == java.sql.Types.VARBINARY || type == java.sql.Types.LONGVARBINARY)) {
+                        // PDI-6677 - don't call 'length = rm.getColumnDisplaySize(index);'
+                        length = -1; // keep the length to -1, e.g. for string functions (e.g.
+                        // CONCAT see PDI-4812)
+                    } else if (databaseMeta.getDatabaseInterface() instanceof SQLiteDatabaseMeta) {
+                        valtype = ValueMetaInterface.TYPE_STRING;
+                    } else {
+                        length = -1;
+                    }
+                    precision = -1;
+                    break;
+//                geo  add begin
+                case Types.OTHER:
+                    valtype = rm.getColumnTypeName(index).equalsIgnoreCase("geometry")
+                            ? ValueMetaInterface.TYPE_GEOMETRY
+                            : ValueMetaInterface.TYPE_STRING;
+                    break;
+                case Types.STRUCT:
+                    if(databaseMeta.getDatabaseInterface() instanceof OracleDatabaseMeta){
+                        valtype = rm.getColumnTypeName(index).equalsIgnoreCase("mdsys.sdo_geometry")
+                                ? ValueMetaInterface.TYPE_GEOMETRY
+                                : ValueMetaInterface.TYPE_STRING;
+                    }else {
+                        valtype = ValueMetaInterface.TYPE_STRING;
+                    }
+
+                    break;
 
         default:
           valtype = ValueMetaInterface.TYPE_STRING;

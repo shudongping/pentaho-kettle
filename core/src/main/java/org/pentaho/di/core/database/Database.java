@@ -1055,7 +1055,29 @@ public class Database implements VariableSpace, LoggingObjectInterface {
   public void setValue( PreparedStatement ps, ValueMetaInterface v, Object object, int pos )
     throws KettleDatabaseException {
 
-    v.setPreparedStatementValue( databaseMeta, ps, pos, object );
+    if(v.getType() == ValueMetaInterface.TYPE_GEOMETRY){
+      try {
+        if (!v.isNull(object)) {
+          GeodatabaseInterface geodb = (GeodatabaseInterface) databaseMeta.getDatabaseInterface();
+          // convert from JTS Geometry to the spatial DBMS' native geometry object:
+          ps.setObject(pos, geodb.convertToObject(v, v.getGeometry(object), this));
+
+          // NOTE: we may have to do something else for other DBMS, depending
+          // if it's handled differently by their JDBC wrappers (e.g. Oracle sdoapi ?)
+          // (not sure... will have to check)
+        } else {
+          // TODO: validate this
+          ps.setNull(pos, java.sql.Types.OTHER);
+        }
+      } catch( Exception e) {
+        throw new KettleDatabaseException("Error setting value #" + pos + " ["
+                + "] on prepared statement", e);
+      }
+
+
+    }else{
+      v.setPreparedStatementValue(databaseMeta, ps, pos, object);
+    }
 
   }
 
@@ -2534,7 +2556,19 @@ public class Database implements VariableSpace, LoggingObjectInterface {
         for ( int i = 0; i < nrcols; i++ ) {
           ValueMetaInterface val = rowInfo.getValueMeta( i );
 
-          data[ i ] = databaseMeta.getValueFromResultSet( rs, val, i );
+          //geo begin
+          if(ValueMetaInterface.TYPE_GEOMETRY == val.getType()){
+            if(databaseMeta.supportsGeometries()){
+              Object o = rs.getObject(i + 1);
+              GeodatabaseInterface geodb = (GeodatabaseInterface) databaseMeta.getDatabaseInterface();
+              data[i] = geodb.convertToJTSGeometry(val, o, this);
+            }else {
+              data[i] = null;
+            }
+            //geo end
+          }else {
+            data[i] = databaseMeta.getValueFromResultSet(rs, val, i);
+          }
         }
       } else {
         data = null;
